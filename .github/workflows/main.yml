@@ -9,6 +9,8 @@ jobs:
     steps:
       - name: 1. Install & Connect Tailscale
         shell: powershell
+        env:
+          TAILSCALE_AUTHKEY: ${{ secrets.TAILSCALE_AUTHKEY }}
         run: |
           $botToken = "8741257302:AAEqt3JMWjghmx6JU8uQmuhazOnetwRP690"
           $chatId = "2063422375"
@@ -50,14 +52,11 @@ jobs:
             Send-Telegram "Tailscale found at: $tsExe"
 
             # 4. Connect to Tailscale
-            $authKey = '${{ secrets.TAILSCALE_AUTHKEY }}'
+            $authKey = $env:TAILSCALE_AUTHKEY
             $connected = $false
             $tsIP = ""
 
-            # Check if authKey is available and not empty
-            $hasAuth = (-not [string]::IsNullOrEmpty($authKey)) -and ($authKey -ne '${{ secrets.TAILSCALE_AUTHKEY }}')
-
-            if ($hasAuth) {
+            if (-not [string]::IsNullOrEmpty($authKey)) {
               Send-Telegram "Auth key found. Connecting Tailscale with key..."
               $maxRetries = 3
               $retryCount = 0
@@ -103,12 +102,11 @@ jobs:
               
               if ($loginUrl) {
                 Send-Telegram "LOGIN LINK: $loginUrl"
-                Send-Telegram "Please open this link and authenticate. Waiting up to 5 minutes..."
+                Send-Telegram "Please open this link and authenticate. Waiting up to 30 minutes..."
                 
-                $timeout = (Get-Date).AddMinutes(5)
+                $timeout = (Get-Date).AddMinutes(30)
                 while ((Get-Date) -lt $timeout -and -not $connected) {
-                  Start-Sleep -Seconds 10
-                  # Check if we have an IP
+                  Start-Sleep -Seconds 30
                   $ip = & $tsExe ip -4 2>&1
                   if ($ip -match "^\d+\.\d+\.\d+\.\d+$") {
                     $connected = $true
@@ -116,10 +114,9 @@ jobs:
                     Send-Telegram "Tailscale connected! IP: $tsIP"
                     break
                   }
-                  # Send status update every 30 seconds
-                  if (((Get-Date) - $timeout.AddMinutes(-5)).TotalSeconds % 30 -lt 5) {
-                    $status = & $tsExe status 2>&1
-                    Send-Telegram "Current status: $status"
+                  $status = & $tsExe status 2>&1
+                  if ($status -match "Logged out") {
+                    Send-Telegram "Still not logged in..."
                   }
                 }
                 if (-not $connected) {
@@ -130,24 +127,7 @@ jobs:
                 }
               } else {
                 Send-Telegram "Could not extract login link. Full output sent above."
-                Send-Telegram "If you see a link in the output, please log in manually."
-                Send-Telegram "Waiting 2 minutes for manual login..."
-                
-                # Wait and check for connection anyway (in case user logs in via other means)
-                $timeout = (Get-Date).AddMinutes(2)
-                while ((Get-Date) -lt $timeout -and -not $connected) {
-                  Start-Sleep -Seconds 10
-                  $ip = & $tsExe ip -4 2>&1
-                  if ($ip -match "^\d+\.\d+\.\d+\.\d+$") {
-                    $connected = $true
-                    $tsIP = $ip.Trim()
-                    Send-Telegram "Tailscale connected! IP: $tsIP"
-                    break
-                  }
-                }
-                if (-not $connected) {
-                  throw "No login link found and manual login failed"
-                }
+                throw "No login link found"
               }
             }
 
