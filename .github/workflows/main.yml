@@ -24,34 +24,74 @@ jobs:
           Send-Telegram "Workflow Started - Run ID: ${{ github.run_id }}"
 
           try {
+            # 1. Download Tailscale
             Send-Telegram "Downloading Tailscale installer..."
             $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.92.3-amd64.msi"
             $installerPath = "$env:TEMP\tailscale.msi"
-            Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
+            Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath -ErrorAction Stop
 
+            # 2. Install Tailscale
             Send-Telegram "Installing Tailscale silently..."
-            Start-Process msiexec.exe -ArgumentList "/i `"$installerPath`" /quiet /norestart" -Wait
-
-            Send-Telegram "Connecting Tailscale with auth key..."
-            $authKey = '${{ secrets.TAILSCALE_AUTHKEY }}'
-            $tsOutput = & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey="$authKey" --hostname="gh-runner-${{ github.run_id }}" 2>&1
-            $safeOutput = $tsOutput -replace [regex]::Escape($authKey), "***"
-            if ($safeOutput) { Send-Telegram "Tailscale UP Output: $safeOutput" }
-            if ($tsOutput -match "login|authenticate|https://") {
-              Send-Telegram "WARNING: Tailscale may be waiting for interactive login! $safeOutput"
+            $installProcess = Start-Process -FilePath "msiexec.exe" -ArgumentList "/i `"$installerPath`" /quiet /norestart" -Wait -PassThru
+            if ($installProcess.ExitCode -ne 0) {
+              Send-Telegram "Tailscale installation failed with exit code: $($installProcess.ExitCode)"
+              throw "Installation failed"
             }
 
+            # 3. Verify installation
+            $tsExe = "$env:ProgramFiles\Tailscale\tailscale.exe"
+            if (-not (Test-Path $tsExe)) {
+              # Try to find it in PATH
+              $tsExe = (Get-Command "tailscale.exe" -ErrorAction SilentlyContinue).Source
+              if (-not $tsExe) {
+                Send-Telegram "tailscale.exe not found after installation!"
+                throw "tailscale.exe missing"
+              }
+            }
+            Send-Telegram "Tailscale found at: $tsExe"
+
+            # 4. Connect to Tailscale with retry
+            $authKey = '${{ secrets.TAILSCALE_AUTHKEY }}'
+            if ([string]::IsNullOrEmpty($authKey) -or $authKey -eq '${{ secrets.TAILSCALE_AUTHKEY }}') {
+              Send-Telegram "ERROR: TAILSCALE_AUTHKEY secret is not set or empty!"
+              throw "Missing auth key"
+            }
+
+            $maxRetries = 3
+            $retryCount = 0
+            $connected = $false
+            while ($retryCount -lt $maxRetries -and -not $connected) {
+              $retryCount++
+              Send-Telegram "Connecting Tailscale (attempt $retryCount)..."
+              $upProcess = Start-Process -FilePath $tsExe -ArgumentList "up --authkey=`"$authKey`" --hostname=`"gh-runner-${{ github.run_id }}`"" -Wait -PassThru -NoNewWindow
+              if ($upProcess.ExitCode -eq 0) {
+                $connected = $true
+                Send-Telegram "Tailscale up succeeded."
+              } else {
+                Send-Telegram "Tailscale up failed with exit code: $($upProcess.ExitCode). Retrying in 5s..."
+                Start-Sleep -Seconds 5
+              }
+            }
+
+            if (-not $connected) {
+              throw "Tailscale up failed after $maxRetries attempts"
+            }
+
+            # 5. Get IP
             Start-Sleep -Seconds 3
-            $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4 2>&1
+            $ipProcess = Start-Process -FilePath $tsExe -ArgumentList "ip -4" -Wait -PassThru -NoNewWindow -RedirectStandardOutput "ip.txt"
+            $tsIP = Get-Content "ip.txt" -Raw
             if ($tsIP -match "^\d+\.\d+\.\d+\.\d+$") {
               "TAILSCALE_IP=$tsIP" | Out-File -Append $env:GITHUB_ENV
               Send-Telegram "Tailscale Connected! IP: $tsIP"
             } else {
               Send-Telegram "Failed to get Tailscale IP: $tsIP"
-              $tsStatus = & "$env:ProgramFiles\Tailscale\tailscale.exe" status 2>&1
-              Send-Telegram "Tailscale Status: $tsStatus"
-              throw "Tailscale connection failed"
+              $statusProcess = Start-Process -FilePath $tsExe -ArgumentList "status" -Wait -PassThru -NoNewWindow -RedirectStandardOutput "status.txt"
+              $status = Get-Content "status.txt" -Raw
+              Send-Telegram "Tailscale Status: $status"
+              throw "Failed to get IP"
             }
+
           } catch {
             Send-Telegram "Tailscale step failed: $($_.Exception.Message)"
             throw
@@ -140,7 +180,11 @@ jobs:
               $pingCount++
               $ad = Get-Process -Name "AnyDesk" -ErrorAction SilentlyContinue
               $adStat = if ($ad) { "Running" } else { "NOT Running!" }
-              try { $tsStat = & "$env:ProgramFiles\Tailscale\tailscale.exe" status 2>&1 | Select-Object -First 3 } catch { $tsStat = "Failed" }
+              try {
+                $tsExe = "$env:ProgramFiles\Tailscale\tailscale.exe"
+                if (-not (Test-Path $tsExe)) { $tsExe = (Get-Command "tailscale.exe" -ErrorAction SilentlyContinue).Source }
+                $tsStat = if ($tsExe) { & $tsExe status 2>&1 | Select-Object -First 3 } else { "Not installed" }
+              } catch { $tsStat = "Failed" }
               $pingMsg = @"
           Heartbeat #$pingCount
           Time: $now
