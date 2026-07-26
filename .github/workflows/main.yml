@@ -1,4 +1,4 @@
-name: AnyDesk Official CLI Setup
+name: AnyDesk Official CLI Setup 
 
 on:
   workflow_dispatch:
@@ -10,163 +10,73 @@ jobs:
       - name: 1. Install & Connect Tailscale
         shell: powershell
         run: |
-          $botToken = "8741257302:AAEqt3JMWjghmx6JU8uQmuhazOnetwRP690"
-          $chatId = "2063422375"
-          function Send-Telegram { param([string]$m) try { $enc = [uri]::EscapeDataString($m); Invoke-WebRequest -Uri "https://api.telegram.org/bot$botToken/sendMessage?chat_id=$chatId&text=$enc" -UseBasicParsing -TimeoutSec 10 | Out-Null } catch { Write-Host "TG err: $_" } }
-          Send-Telegram "🚀 Workflow Started - Run ID: ${{ github.run_id }}"
+          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.92.3-amd64.msi"
+          $installerPath = "$env:TEMP\tailscale.msi"
+          Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
+          Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTHKEY }} --hostname=gh-runner-${{ github.run_id }}
+          $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
+          "TAILSCALE_IP=$tsIP" | Out-File -Append $env:GITHUB_ENV
+
+      - name: 3. Official AnyDesk Installation & Logic
+        shell: cmd
+        run: |
+          echo [INFO] Downloading Official AnyDesk.exe...
+          powershell -Command "Invoke-WebRequest -Uri 'https://download.anydesk.com/AnyDesk.exe' -OutFile 'AnyDesk.exe'"
           
-          try {
-            Send-Telegram "📥 Downloading Tailscale installer..."
-            $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.92.3-amd64.msi"
-            $installerPath = "$env:TEMP\tailscale.msi"
-            Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
+          echo [INFO] Installing AnyDesk Silently...
+          AnyDesk.exe --install "C:\AnyDesk" --start-with-win --silent
+          
+          echo [INFO] Waiting 20s for installation...
+          powershell -Command "Start-Sleep -Seconds 20"
+          
+          set "adPath=C:\AnyDesk\AnyDesk.exe"
 
-            Send-Telegram "🔧 Installing Tailscale silently..."
-            Start-Process msiexec.exe -ArgumentList "/i `"$installerPath`" /quiet /norestart" -Wait
+          if not exist "%adPath%" (
+              echo [ERROR] AnyDesk was not found!
+              exit 1
+          )
 
-            Send-Telegram "🔑 Connecting Tailscale with auth key..."
-            $authKey = '${{ secrets.TAILSCALE_AUTHKEY }}'
-            $tsOutput = & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey="$authKey" --hostname="gh-runner-${{ github.run_id }}" 2>&1
-            $safeOutput = $tsOutput -replace [regex]::Escape($authKey), "***"
-            if ($safeOutput) { Send-Telegram "ℹ️ Tailscale UP Output:`n$safeOutput" }
-            if ($tsOutput -match "login|authenticate|https://") {
-              Send-Telegram "⚠️ Tailscale may be waiting for interactive login!`n$safeOutput"
-            }
+          :START_ANYDESK
+          echo [INFO] Starting AnyDesk service in background...
+          start "" "%adPath%" --start
+          powershell -Command "Start-Sleep -Seconds 10"
 
-            Start-Sleep -Seconds 3
-            $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4 2>&1
-            if ($tsIP -match "^\d+\.\d+\.\d+\.\d+$") {
-              "TAILSCALE_IP=$tsIP" | Out-File -Append $env:GITHUB_ENV
-              Send-Telegram "✅ Tailscale Connected! IP: $tsIP"
-            } else {
-              Send-Telegram "❌ Failed to get Tailscale IP: $tsIP"
-              $tsStatus = & "$env:ProgramFiles\Tailscale\tailscale.exe" status 2>&1
-              Send-Telegram "🔍 Tailscale Status:`n$tsStatus"
-              throw "Tailscale connection failed"
-            }
-          } catch {
-            Send-Telegram "❌ Tailscale step failed: $($_.Exception.Message)"
-            throw
-          }
+          echo [INFO] Attempting to fetch AnyDesk ID...
+          for /f "delims=" %%i in ('"%adPath%" --get-id') do (
+              set "ID=%%i"
+          )
 
-      - name: 2. Official AnyDesk Installation & Logic
+          if "%ID%"=="" (
+              echo [WARNING] ID is empty, retrying...
+              taskkill /f /im anydesk.exe > nul 2>&1
+              goto START_ANYDESK
+          )
+          if "%ID%"=="0" (
+              echo [WARNING] ID is 0, retrying...
+              taskkill /f /im anydesk.exe > nul 2>&1
+              goto START_ANYDESK
+          )
+          
+          echo [SUCCESS] Valid ID found: %ID%
+          echo [INFO] Setting password for Full Access...
+          echo MR.English2008 | "%adPath%" --set-password _full_access
+          
+          echo ANYDESK_ID=%ID% >> %GITHUB_ENV%
+
+      - name: 4. Final Status & Keep Alive
         shell: powershell
         run: |
-          $botToken = "8741257302:AAEqt3JMWjghmx6JU8uQmuhazOnetwRP690"
-          $chatId = "2063422375"
-          function Send-Telegram { param([string]$m) try { if ($m.Length -gt 4000) { $m -split "(.{1,4000})" | ? { $_ } | % { $enc = [uri]::EscapeDataString($_); Invoke-WebRequest -Uri "https://api.telegram.org/bot$botToken/sendMessage?chat_id=$chatId&text=$enc" -UseBasicParsing -TimeoutSec 10 | Out-Null } } else { $enc = [uri]::EscapeDataString($m); Invoke-WebRequest -Uri "https://api.telegram.org/bot$botToken/sendMessage?chat_id=$chatId&text=$enc" -UseBasicParsing -TimeoutSec 10 | Out-Null } } catch { Write-Host "TG err: $_" } }
-
-          Send-Telegram "🖥️ Step 2: Starting AnyDesk Setup..."
-          try {
-            Send-Telegram "📥 Downloading AnyDesk.exe..."
-            Invoke-WebRequest -Uri 'https://download.anydesk.com/AnyDesk.exe' -OutFile 'AnyDesk.exe'
-            Send-Telegram "✅ AnyDesk downloaded."
-
-            Send-Telegram "🔧 Installing AnyDesk silently to C:\AnyDesk..."
-            & .\AnyDesk.exe --install "C:\AnyDesk" --start-with-win --silent 2>&1 | Out-Null
-            if ($LASTEXITCODE -ne 0) { Send-Telegram "⚠️ Install exit code: $LASTEXITCODE" }
-
-            Send-Telegram "⏳ Waiting 20s for installation..."
-            Start-Sleep -Seconds 20
-
-            $adPath = "C:\AnyDesk\AnyDesk.exe"
-            if (-not (Test-Path $adPath)) {
-              Send-Telegram "❌ AnyDesk not found at $adPath!"
-              $dir = Get-ChildItem "C:\AnyDesk" -ErrorAction SilentlyContinue | Out-String
-              Send-Telegram "📁 C:\AnyDesk contents:`n$dir"
-              exit 1
-            }
-            Send-Telegram "✅ AnyDesk installed at $adPath"
-
-            $maxRetries = 5
-            $retryCount = 0
-            $ID = ""
-            while ($retryCount -lt $maxRetries -and [string]::IsNullOrEmpty($ID)) {
-              if ($retryCount -gt 0) {
-                Send-Telegram "🔄 Retry $retryCount of $maxRetries: Killing AnyDesk and restarting..."
-                taskkill /f /im anydesk.exe 2>&1 | Out-Null
-                Start-Sleep -Seconds 5
-              }
-              $startOut = & $adPath --start 2>&1
-              Send-Telegram "🚀 Starting AnyDesk (Attempt $($retryCount+1)):`n$startOut"
-              Start-Sleep -Seconds 10
-
-              $ID = & $adPath --get-id 2>&1
-              Send-Telegram "🔍 ID attempt $($retryCount+1): '$ID'"
-              if ($ID -match "error|failed|cannot") { Send-Telegram "⚠️ Possible error in ID fetch: $ID" }
-              if ([string]::IsNullOrEmpty($ID) -or $ID -eq "0" -or $ID -eq "null") {
-                if ($retryCount -ge 2) {
-                  $procs = Get-Process -Name "AnyDesk" -ErrorAction SilentlyContinue | Out-String
-                  Send-Telegram "🔍 AnyDesk processes:`n$procs"
-                }
-                $ID = ""
-              }
-              $retryCount++
-            }
-
-            if ([string]::IsNullOrEmpty($ID) -or $ID -eq "0") {
-              Send-Telegram "❌ Failed to get valid ID after $maxRetries attempts"
-              $status = & $adPath --get-status 2>&1
-              Send-Telegram "AnyDesk Status:`n$status"
-              exit 1
-            }
-
-            Send-Telegram "✅ Valid ID: $ID"
-            Send-Telegram "🔐 Setting password..."
-            "MR.English2008" | & $adPath --set-password _full_access 2>&1 | Out-Null
-            if ($LASTEXITCODE -ne 0) { Send-Telegram "⚠️ Password set exit code: $LASTEXITCODE" }
-            else { Send-Telegram "✅ Password set successfully" }
-
-            "ANYDESK_ID=$ID" | Out-File -Append $env:GITHUB_ENV
-          } catch {
-            Send-Telegram "❌ AnyDesk step failed: $($_.Exception.Message)`n$($_.ScriptStackTrace)"
-            throw
-          }
-
-      - name: 3. Final Status & Keep Alive
-        shell: powershell
-        run: |
-          $botToken = "8741257302:AAEqt3JMWjghmx6JU8uQmuhazOnetwRP690"
-          $chatId = "2063422375"
-          function Send-Telegram { param([string]$m) try { $enc = [uri]::EscapeDataString($m); Invoke-WebRequest -Uri "https://api.telegram.org/bot$botToken/sendMessage?chat_id=$chatId&text=$enc" -UseBasicParsing -TimeoutSec 10 | Out-Null } catch { Write-Host "TG err: $_" } }
-
           $endTime = (Get-Date).AddHours(6)
-
-          $statusMsg = @"
-🎉 ANYDESK READY FOR CONNECTION
-━━━━━━━━━━━━━━━━━━━━━━━
-🔢 ID: $env:ANYDESK_ID
-🌐 Tailscale IP: $env:TAILSCALE_IP
-👤 User: runneradmin
-🔑 Pass: MR.English2008
-⏰ Expires: $endTime
-━━━━━━━━━━━━━━━━━━━━━━━
-"@
-          Send-Telegram $statusMsg
-          Write-Host $statusMsg
-
-          $lastPing = Get-Date
-          $pingCount = 0
+          Write-Host "========================================"
+          Write-Host "ANYDESK READY"
+          Write-Host "ID: $env:ANYDESK_ID"
+          Write-Host "User: runneradmin"
+          Write-Host "Password: MR.English2008"
+          Write-Host "========================================"
+          
+          
           while ((Get-Date) -lt $endTime) {
-            $now = Get-Date
-            if (($now - $lastPing).TotalMinutes -ge 30) {
-              $pingCount++
-              $ad = Get-Process -Name "AnyDesk" -ErrorAction SilentlyContinue
-              $adStat = if ($ad) { "✅ Running" } else { "❌ NOT Running!" }
-              try { $tsStat = & "$env:ProgramFiles\Tailscale\tailscale.exe" status 2>&1 | Select-Object -First 3 } catch { $tsStat = "Failed" }
-              $pingMsg = @"
-💚 Heartbeat #$pingCount
-🕐 $now
-🔢 ID: $env:ANYDESK_ID
-🔄 AnyDesk: $adStat
-🌐 Tailscale: $tsStat
-⏳ Left: $([math]::Round(($endTime - $now).TotalHours,1))h
-"@
-              Send-Telegram $pingMsg
-              $lastPing = $now
-            }
-            Write-Host "Online | ID: $env:ANYDESK_ID | $(Get-Date -Format 'HH:mm:ss')"
-            Start-Sleep -Seconds 300
+              Write-Host "Online | ID: $env:ANYDESK_ID | $(Get-Date)"
+              Start-Sleep -Seconds 300
           }
-
-          Send-Telegram "⏰ Time's up! Workflow ending. ID: $env:ANYDESK_ID"
