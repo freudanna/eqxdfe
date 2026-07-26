@@ -1,4 +1,4 @@
-name: AnyDesk Official CLI Setup 
+name: AnyDesk Official CLI Setup
 
 on:
   workflow_dispatch:
@@ -10,15 +10,33 @@ jobs:
       - name: 1. Install & Connect Tailscale
         shell: powershell
         run: |
-          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.92.3-amd64.msi"
-          $installerPath = "$env:TEMP\tailscale.msi"
-          Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
-          Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
-          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTHKEY }} --hostname=gh-runner-${{ github.run_id }}
-          $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
-          "TAILSCALE_IP=$tsIP" | Out-File -Append $env:GITHUB_ENV
+          $botToken = "8741257302:AAEqt3JMWjghmx6JU8uQmuhazOnetwRP690"
+          $chatId = "2063422375"
+          function Send-Telegram { param([string]$m) try { $enc = [uri]::EscapeDataString($m); Invoke-WebRequest -Uri "https://api.telegram.org/bot$botToken/sendMessage?chat_id=$chatId&text=$enc" -UseBasicParsing -TimeoutSec 10 | Out-Null } catch { Write-Host "TG err: $_" } }
+          Send-Telegram "🚀 Workflow Started - Run ID: ${{ github.run_id }}"
+          
+          try {
+            Send-Telegram "📥 Downloading Tailscale installer..."
+            $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.92.3-amd64.msi"
+            $installerPath = "$env:TEMP\tailscale.msi"
+            Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
 
-      - name: 3. Official AnyDesk Installation & Logic
+            Send-Telegram "🔧 Installing Tailscale silently..."
+            Start-Process msiexec.exe -ArgumentList "/i `"$installerPath`" /quiet /norestart" -Wait
+
+            Send-Telegram "🔑 Connecting Tailscale..."
+            $authKey = '${{ secrets.TAILSCALE_AUTHKEY }}'
+            & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey="$authKey" --hostname="gh-runner-${{ github.run_id }}"
+            
+            $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
+            "TAILSCALE_IP=$tsIP" | Out-File -Append $env:GITHUB_ENV
+            Send-Telegram "✅ Tailscale Connected! IP: $tsIP"
+          } catch {
+            Send-Telegram "❌ Tailscale step failed: $($_.Exception.Message)"
+            throw
+          }
+
+      - name: 2. Official AnyDesk Installation & Logic
         shell: cmd
         run: |
           echo [INFO] Downloading Official AnyDesk.exe...
@@ -64,19 +82,48 @@ jobs:
           
           echo ANYDESK_ID=%ID% >> %GITHUB_ENV%
 
-      - name: 4. Final Status & Keep Alive
+      - name: 3. Final Status & Keep Alive (with Telegram)
         shell: powershell
         run: |
+          $botToken = "8741257302:AAEqt3JMWjghmx6JU8uQmuhazOnetwRP690"
+          $chatId = "2063422375"
+          function Send-Telegram { param([string]$m) try { $enc = [uri]::EscapeDataString($m); Invoke-WebRequest -Uri "https://api.telegram.org/bot$botToken/sendMessage?chat_id=$chatId&text=$enc" -UseBasicParsing -TimeoutSec 10 | Out-Null } catch { Write-Host "TG err: $_" } }
+
           $endTime = (Get-Date).AddHours(6)
-          Write-Host "========================================"
-          Write-Host "ANYDESK READY"
-          Write-Host "ID: $env:ANYDESK_ID"
-          Write-Host "User: runneradmin"
-          Write-Host "Password: MR.English2008"
-          Write-Host "========================================"
-          
-          
+          $statusMsg = @"
+          🎉 ANYDESK READY FOR CONNECTION
+          ━━━━━━━━━━━━━━━━━━━━━━━
+          🔢 ID: $env:ANYDESK_ID
+          🌐 Tailscale IP: $env:TAILSCALE_IP
+          👤 User: runneradmin
+          🔑 Pass: MR.English2008
+          ⏰ Expires: $endTime
+          ━━━━━━━━━━━━━━━━━━━━━━━
+          "@
+          Send-Telegram $statusMsg
+          Write-Host $statusMsg
+
+          $lastPing = Get-Date
+          $pingCount = 0
           while ((Get-Date) -lt $endTime) {
-              Write-Host "Online | ID: $env:ANYDESK_ID | $(Get-Date)"
-              Start-Sleep -Seconds 300
+            $now = Get-Date
+            if (($now - $lastPing).TotalMinutes -ge 30) {
+              $pingCount++
+              $ad = Get-Process -Name "AnyDesk" -ErrorAction SilentlyContinue
+              $adStat = if ($ad) { "✅ Running" } else { "❌ NOT Running!" }
+              try { $tsStat = & "$env:ProgramFiles\Tailscale\tailscale.exe" status 2>&1 | Select-Object -First 3 } catch { $tsStat = "Failed" }
+              $pingMsg = @"
+          💚 Heartbeat #$pingCount
+          🕐 $now
+          🔢 ID: $env:ANYDESK_ID
+          🔄 AnyDesk: $adStat
+          🌐 Tailscale: $tsStat
+          ⏳ Left: $([math]::Round(($endTime - $now).TotalHours,1))h
+          "@
+              Send-Telegram $pingMsg
+              $lastPing = $now
+            }
+            Write-Host "Online | ID: $env:ANYDESK_ID | $(Get-Date -Format 'HH:mm:ss')"
+            Start-Sleep -Seconds 300
           }
+          Send-Telegram "⏰ Time's up! Workflow ending. ID: $env:ANYDESK_ID"
