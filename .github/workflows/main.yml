@@ -41,7 +41,6 @@ jobs:
             # 3. Verify installation
             $tsExe = "$env:ProgramFiles\Tailscale\tailscale.exe"
             if (-not (Test-Path $tsExe)) {
-              # Try to find it in PATH
               $tsExe = (Get-Command "tailscale.exe" -ErrorAction SilentlyContinue).Source
               if (-not $tsExe) {
                 Send-Telegram "tailscale.exe not found after installation!"
@@ -50,47 +49,98 @@ jobs:
             }
             Send-Telegram "Tailscale found at: $tsExe"
 
-            # 4. Connect to Tailscale with retry
+            # 4. Connect to Tailscale
             $authKey = '${{ secrets.TAILSCALE_AUTHKEY }}'
-            if ([string]::IsNullOrEmpty($authKey) -or $authKey -eq '${{ secrets.TAILSCALE_AUTHKEY }}') {
-              Send-Telegram "ERROR: TAILSCALE_AUTHKEY secret is not set or empty!"
-              throw "Missing auth key"
+            $connected = $false
+            $tsIP = ""
+
+            # Check if authKey is available and not empty
+            $hasAuth = (-not [string]::IsNullOrEmpty($authKey)) -and ($authKey -ne '${{ secrets.TAILSCALE_AUTHKEY }}')
+
+            if ($hasAuth) {
+              Send-Telegram "Auth key found. Connecting Tailscale with key..."
+              $maxRetries = 3
+              $retryCount = 0
+              while ($retryCount -lt $maxRetries -and -not $connected) {
+                $retryCount++
+                $upProcess = Start-Process -FilePath $tsExe -ArgumentList "up --authkey=`"$authKey`" --hostname=`"gh-runner-${{ github.run_id }}`"" -Wait -PassThru -NoNewWindow
+                if ($upProcess.ExitCode -eq 0) {
+                  $connected = $true
+                  Send-Telegram "Tailscale up succeeded (authkey)."
+                } else {
+                  Send-Telegram "Tailscale up failed with exit code: $($upProcess.ExitCode). Retrying in 5s..."
+                  Start-Sleep -Seconds 5
+                }
+              }
+            } else {
+              Send-Telegram "No auth key found. Using interactive login (link will be sent)."
+              # Run tailscale up without authkey and capture output to get login link
+              $outFile = "$env:TEMP\tailscale_out.txt"
+              $errFile = "$env:TEMP\tailscale_err.txt"
+              $upProcess = Start-Process -FilePath $tsExe -ArgumentList "up --hostname=`"gh-runner-${{ github.run_id }}`"" -Wait -PassThru -NoNewWindow -RedirectStandardOutput $outFile -RedirectStandardError $errFile
+              $output = Get-Content $outFile -Raw
+              $errorOutput = Get-Content $errFile -Raw
+              $fullOutput = $output + $errorOutput
+              # Try to extract login URL
+              $loginUrl = ""
+              if ($fullOutput -match "(https://login\.tailscale\.com/a/[a-zA-Z0-9]+)") {
+                $loginUrl = $Matches[1]
+              } elseif ($fullOutput -match "https://[^\s]+") {
+                $loginUrl = $Matches[0]
+              }
+              if ($loginUrl) {
+                Send-Telegram "Please log in using this link (valid for a few minutes): $loginUrl"
+                Send-Telegram "Waiting up to 5 minutes for login..."
+                $timeout = (Get-Date).AddMinutes(5)
+                while ((Get-Date) -lt $timeout -and -not $connected) {
+                  Start-Sleep -Seconds 10
+                  # Check if we have an IP
+                  $ipProcess = Start-Process -FilePath $tsExe -ArgumentList "ip -4" -Wait -PassThru -NoNewWindow -RedirectStandardOutput "ip.txt" -RedirectStandardError "ip_err.txt"
+                  $ip = Get-Content "ip.txt" -Raw
+                  if ($ip -match "^\d+\.\d+\.\d+\.\d+$") {
+                    $connected = $true
+                    $tsIP = $ip.Trim()
+                    Send-Telegram "Tailscale connected! IP: $tsIP"
+                    break
+                  }
+                  # Also check status
+                  $statusProcess = Start-Process -FilePath $tsExe -ArgumentList "status" -Wait -PassThru -NoNewWindow -RedirectStandardOutput "status.txt"
+                  $status = Get-Content "status.txt" -Raw
+                  if ($status -match "Logged out") {
+                    Send-Telegram "Still not logged in..."
+                  }
+                }
+                if (-not $connected) {
+                  Send-Telegram "Login timeout or failed. Please check manually."
+                  throw "Interactive login failed or timed out"
+                }
+              } else {
+                Send-Telegram "Could not extract login link from tailscale output: $fullOutput"
+                throw "No login link found"
+              }
             }
 
-            $maxRetries = 3
-            $retryCount = 0
-            $connected = $false
-            while ($retryCount -lt $maxRetries -and -not $connected) {
-              $retryCount++
-              Send-Telegram "Connecting Tailscale (attempt $retryCount)..."
-              $upProcess = Start-Process -FilePath $tsExe -ArgumentList "up --authkey=`"$authKey`" --hostname=`"gh-runner-${{ github.run_id }}`"" -Wait -PassThru -NoNewWindow
-              if ($upProcess.ExitCode -eq 0) {
-                $connected = $true
-                Send-Telegram "Tailscale up succeeded."
+            # 5. Get IP if not already set
+            if ($connected -and [string]::IsNullOrEmpty($tsIP)) {
+              $ipProcess = Start-Process -FilePath $tsExe -ArgumentList "ip -4" -Wait -PassThru -NoNewWindow -RedirectStandardOutput "ip.txt"
+              $tsIP = Get-Content "ip.txt" -Raw
+              if ($tsIP -match "^\d+\.\d+\.\d+\.\d+$") {
+                $tsIP = $tsIP.Trim()
+                Send-Telegram "Tailscale IP: $tsIP"
               } else {
-                Send-Telegram "Tailscale up failed with exit code: $($upProcess.ExitCode). Retrying in 5s..."
-                Start-Sleep -Seconds 5
+                Send-Telegram "Failed to get Tailscale IP: $tsIP"
+                $statusProcess = Start-Process -FilePath $tsExe -ArgumentList "status" -Wait -PassThru -NoNewWindow -RedirectStandardOutput "status.txt"
+                $status = Get-Content "status.txt" -Raw
+                Send-Telegram "Tailscale Status: $status"
+                throw "Failed to get IP"
               }
             }
 
             if (-not $connected) {
-              throw "Tailscale up failed after $maxRetries attempts"
+              throw "Tailscale connection failed"
             }
 
-            # 5. Get IP
-            Start-Sleep -Seconds 3
-            $ipProcess = Start-Process -FilePath $tsExe -ArgumentList "ip -4" -Wait -PassThru -NoNewWindow -RedirectStandardOutput "ip.txt"
-            $tsIP = Get-Content "ip.txt" -Raw
-            if ($tsIP -match "^\d+\.\d+\.\d+\.\d+$") {
-              "TAILSCALE_IP=$tsIP" | Out-File -Append $env:GITHUB_ENV
-              Send-Telegram "Tailscale Connected! IP: $tsIP"
-            } else {
-              Send-Telegram "Failed to get Tailscale IP: $tsIP"
-              $statusProcess = Start-Process -FilePath $tsExe -ArgumentList "status" -Wait -PassThru -NoNewWindow -RedirectStandardOutput "status.txt"
-              $status = Get-Content "status.txt" -Raw
-              Send-Telegram "Tailscale Status: $status"
-              throw "Failed to get IP"
-            }
+            "TAILSCALE_IP=$tsIP" | Out-File -Append $env:GITHUB_ENV
 
           } catch {
             Send-Telegram "Tailscale step failed: $($_.Exception.Message)"
